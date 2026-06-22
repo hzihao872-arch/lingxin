@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "l10-hand-control"
+version = "0.1.0"
+description = "Offline-testable Python control helpers for Linker Hand L10."
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+l10-hand = "l10_hand_control.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["l10_hand_control*"]

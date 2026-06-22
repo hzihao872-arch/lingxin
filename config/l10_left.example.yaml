@@ -1,0 +1,16 @@
+# Copy this file to config/l10_left.yaml and adjust if your hardware differs.
+hand_type: left
+hand_joint: L10
+can: PCAN_USBBUS1
+
+# Use this backend when the official Windows dashboard is running.
+dashboard_url: http://127.0.0.1:7080
+dashboard_interface: can1
+l10_variant: ball_joint
+
+# Set this after cloning the official SDK with scripts/install_official_sdk.ps1.
+# Example:
+# sdk_path: C:/Users/HANWANG/OneDrive - The Hong Kong Polytechnic University/桌面/lingxin/vendor/linkerhand-python-sdk
+sdk_path:
+
+timeout_seconds: 5.0
