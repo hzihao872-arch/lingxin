@@ -6,6 +6,7 @@ import requests
 
 from l10_hand_control.config import HandConfig
 from l10_hand_control.errors import ControlError
+from l10_hand_control.l10_pose import clamp_pose
 
 
 class DashboardController:
@@ -72,10 +73,11 @@ class DashboardController:
     def move_pose(self, pose: list[int]) -> Any:
         if len(pose) != 10:
             raise ValueError("L10 pose must contain 10 values")
+        safe_pose = clamp_pose(pose, self.config.l10_variant)
         return self._post(
             "/api/hand/joint/logical",
             {
-                "logical_values": {"basic": _pose_to_basic_values(pose)},
+                "logical_values": {"basic": _pose_to_basic_values(safe_pose)},
                 "targets": [self._target()],
             },
         )

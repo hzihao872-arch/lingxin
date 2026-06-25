@@ -16,9 +16,22 @@ dependencies = [
 test = [
     "pytest>=8.0",
 ]
+vision = [
+    "mediapipe>=0.10.9",
+    "opencv-python>=4.8",
+]
+sdk = [
+    "python-can>=4.3",
+    "python-can-candle>=1.0",
+    "numpy>=1.26",
+]
 
 [project.scripts]
 l10-hand = "l10_hand_control.cli:main"
+l10-web = "l10_hand_control.web_server:main"
 
 [tool.setuptools.packages.find]
 include = ["l10_hand_control*"]
+
+[tool.setuptools.package-data]
+l10_hand_control = ["static/*"]

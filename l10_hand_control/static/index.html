@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>L10 关节控制</title>
+  <link rel="stylesheet" href="/style.css?v=3" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div>
+        <h1>L10 灵巧手关节控制</h1>
+        <p class="subtitle">调节十个关节自由度，保存姿态并一键恢复</p>
+      </div>
+      <div class="status-card" id="status-card">
+        <span class="status-dot" id="status-dot"></span>
+        <div>
+          <div class="status-title" id="status-title">检查连接中…</div>
+          <div class="status-detail" id="status-detail"></div>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel controls-panel">
+        <div class="panel-header">
+          <h2>关节调节</h2>
+          <div class="toolbar">
+            <label class="speed-control">
+              速度
+              <input type="number" id="speed-input" min="0" max="255" value="120" />
+            </label>
+            <label class="live-toggle">
+              <input type="checkbox" id="live-mode" checked />
+              实时调节
+            </label>
+            <button type="button" class="btn secondary" id="btn-apply-speed">设置速度</button>
+            <button type="button" class="btn secondary" id="btn-open-palm">张开手掌</button>
+            <button type="button" class="btn primary" id="btn-apply-pose">发送到机械手</button>
+          </div>
+        </div>
+
+        <div class="joint-grid" id="joint-grid"></div>
+
+        <div class="panel-header">
+          <h2>示教读取</h2>
+          <div class="toolbar teach-toolbar">
+            <button type="button" class="btn accent" id="btn-teach-start">失能并读取</button>
+            <button type="button" class="btn secondary" id="btn-teach-stop" disabled>恢复使能</button>
+          </div>
+        </div>
+        <p class="teach-note" id="teach-note">
+          将扭矩置零后，用手拨动灵巧手，滑块会同步显示十个关节自由度。
+        </p>
+
+        <div class="save-row">
+          <input
+            type="text"
+            id="preset-name"
+            placeholder="输入姿态名称，例如：握拳、OK手势"
+            maxlength="40"
+          />
+          <button type="button" class="btn accent" id="btn-save-preset">保存当前姿态</button>
+        </div>
+        <div class="message" id="message" hidden></div>
+      </section>
+
+      <section class="panel presets-panel">
+        <div class="panel-header">
+          <h2>已保存姿态</h2>
+          <button type="button" class="btn ghost" id="btn-refresh-presets">刷新</button>
+        </div>
+        <div class="preset-list" id="preset-list">
+          <p class="empty">暂无保存的姿态</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js?v=3"></script>
+</body>
+</html>

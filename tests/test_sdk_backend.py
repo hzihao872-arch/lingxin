@@ -16,7 +16,14 @@ class FakeHand:
 
     def get_state(self):
         self.calls.append(("get_state", None))
-        return [1] * 10
+        return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    def get_torque(self):
+        self.calls.append(("get_torque", None))
+        return [100] * 10
+
+    def set_torque(self, torque):
+        self.calls.append(("set_torque", torque))
 
 
 class FakeFactory:
@@ -66,3 +73,21 @@ def test_sdk_backend_moves_l10_pose():
     controller.move_pose([80] * 10)
 
     assert factory.hand.calls == [("finger_move", [80] * 10)]
+
+
+def test_sdk_backend_teach_mode_sets_and_restores_torque():
+    factory = FakeFactory()
+    controller = SdkController(HandConfig(), api_factory=factory)
+
+    result = controller.enter_teach_mode()
+    assert result["teach_active"] is True
+    assert controller.teach_active is True
+    assert factory.hand.calls[-1] == ("set_torque", [0] * 10)
+
+    pose = controller.read_pose()
+    assert pose == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    stop = controller.exit_teach_mode()
+    assert stop["teach_active"] is False
+    assert controller.teach_active is False
+    assert factory.hand.calls[-1] == ("set_torque", [100] * 10)
