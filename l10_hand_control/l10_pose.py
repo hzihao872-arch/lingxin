@@ -81,3 +81,56 @@ def parse_joint_assignments(assignments: list[str]) -> dict[str, int]:
         joint, raw_value = assignment.split("=", 1)
         parsed[joint.strip()] = int(raw_value.strip())
     return parsed
+
+
+def smoothstep(t: float) -> float:
+    """Cubic ease-in-out: slow start, fast middle, slow end. Maps [0,1] to [0,1]."""
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def interpolate_pose(src: list[int], dst: list[int], t: float, ease=smoothstep) -> list[int]:
+    """Per-joint eased interpolation between two 10-value poses."""
+    if len(src) != len(L10_JOINTS) or len(dst) != len(L10_JOINTS):
+        raise ValueError("poses must contain 10 values")
+    e = ease(t)
+    return [int(round(s + (d - s) * e)) for s, d in zip(src, dst, strict=True)]
+
+
+def move_pose_smoothed(
+    controller,
+    dst: list[int],
+    src: list[int] | None = None,
+    steps: int = 12,
+    hz: float = 50.0,
+    ease=smoothstep,
+) -> list[int]:
+    """Move the hand from src to dst over `steps` frames at `hz`, easing each joint.
+
+    ponytail: naive linear+ease interpolation per joint, no velocity profiling.
+    Upgrade path: SDK-native interpolation or trapezoidal velocity profile per joint.
+    Returns the final pose actually sent (clamped, 10 values).
+
+    `controller` must expose `move_pose(pose)`. If `src` is None, the current
+    smoother state or an open palm is used as the start; callers should pass an
+    explicit src when known (e.g. the last sent pose) for a smooth transition.
+    """
+    if steps < 1:
+        steps = 1
+    start = list(src) if src is not None else list(OPEN_PALM_POSE)
+    if len(start) != len(L10_JOINTS):
+        raise ValueError("src pose must contain 10 values")
+    end = clamp_pose(dst)
+    interval = 1.0 / max(hz, 1.0)
+    import time
+
+    for i in range(1, steps + 1):
+        pose = interpolate_pose(start, end, i / steps, ease=ease)
+        try:
+            controller.move_pose(pose)
+        except Exception as exc:  # pragma: no cover - hardware I/O
+            print(f"WARNING: move_pose failed during smooth move: {exc}", flush=True)
+            break
+        if i < steps:
+            time.sleep(interval)
+    return end

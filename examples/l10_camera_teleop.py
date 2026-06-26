@@ -57,7 +57,7 @@ def _import_control_deps():
     from l10_hand_control.config import HandConfig, load_config
     from l10_hand_control.errors import ControlError
     from l10_hand_control.hand_tracking import PoseSmoother, landmarks_to_pose, teleop_open_palm_pose
-    from l10_hand_control.l10_pose import L10_JOINTS
+    from l10_hand_control.l10_pose import L10_JOINTS, move_pose_smoothed
     from l10_hand_control.mediapipe_hands import HandTracker, draw_hand_landmarks
 
     return (
@@ -70,6 +70,7 @@ def _import_control_deps():
         draw_hand_landmarks,
         landmarks_to_pose,
         load_config,
+        move_pose_smoothed,
         teleop_open_palm_pose,
     )
 
@@ -134,7 +135,7 @@ def _open_camera(cv2, camera_index: int):
     return cap
 
 
-def _make_pose_sender(args, controller, min_interval: float):
+def _make_pose_sender(args, controller, min_interval: float, last_sent: list[list[int] | None]):
     from l10_hand_control.async_pose_sender import AsyncPoseSender
 
     last_pose: list[int] | None = None
@@ -144,6 +145,7 @@ def _make_pose_sender(args, controller, min_interval: float):
         if args.verbose and pose != last_pose:
             print(f"sent pose #{count}: {pose}", flush=True)
         last_pose = list(pose)
+        last_sent[0] = list(pose)
 
     sender = AsyncPoseSender(controller, min_interval=min_interval, on_sent=on_sent)
     sender.start()
@@ -203,26 +205,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--update-hz",
         type=float,
-        default=15.0,
-        help="Maximum pose commands sent to the hand per second",
+        default=30.0,
+        help="Maximum pose commands sent to the hand per second (higher = more responsive)",
     )
     parser.add_argument(
         "--smoothing",
         type=float,
-        default=0.28,
-        help="Pose smoothing factor in (0, 1]; lower = smoother but slower",
+        default=0.45,
+        help="Pose smoothing factor in (0, 1]; higher = more responsive, lower = steadier",
     )
     parser.add_argument(
         "--finger-smoothing",
         type=float,
-        default=0.10,
-        help="Extra smoothing for the four finger-root joints (lower = steadier)",
+        default=0.22,
+        help="Extra smoothing for the four finger-root joints (lower = steadier, min 0.06)",
     )
     parser.add_argument(
         "--sensitivity",
         type=float,
         default=1.2,
         help="Amplify hand motion mapping (>1 = larger L10 movement)",
+    )
+    parser.add_argument(
+        "--ease",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Ease the thumb flex curve (default OFF: keeps grip responsive; "
+        "enable only if you prefer a softer start at the cost of partial-grip lag)",
+    )
+    parser.add_argument(
+        "--max-joint-delta",
+        type=float,
+        default=0.0,
+        help="Cap per-joint change per frame (a velocity limit, NOT softness). "
+        "Default 0 = off. Set small only if you want to deliberately slow the hand",
+    )
+    parser.add_argument(
+        "--close-ratio",
+        type=float,
+        default=1.0,
+        help="When --max-joint-delta is set, scale the closing-direction cap by this "
+        "ratio (0..1, lower = slower close). Default 1.0 = symmetric",
     )
     parser.add_argument("--dry-run", action="store_true", help="Track hand only, do not move hardware")
     parser.add_argument(
@@ -255,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         draw_hand_landmarks,
         landmarks_to_pose,
         load_config,
+        move_pose_smoothed,
         teleop_open_palm_pose,
     ) = _import_control_deps()
 
@@ -288,15 +312,18 @@ def main(argv: list[str] | None = None) -> int:
         alpha=args.smoothing,
         thumb_alpha=min(1.0, args.smoothing * 1.8),
         finger_alpha=max(0.06, args.finger_smoothing),
+        max_joint_delta=args.max_joint_delta,
+        close_ratio=args.close_ratio,
     )
     min_interval = 1.0 / max(args.update_hz, 1.0)
     last_send = 0.0
     tracked_label = args.tracked_hand
     send_count = 0
     last_pose: list[int] | None = None
+    last_sent_pose: list[list[int] | None] = [None]
     pose_sender = None
     if controller is not None and not args.sync_hand:
-        pose_sender = _make_pose_sender(args, controller, min_interval)
+        pose_sender = _make_pose_sender(args, controller, min_interval, last_sent_pose)
         _startup("Hand control running in background (camera loop will stay responsive).")
 
     print("Camera teleop started. Press Q or Esc in the preview window to quit.", flush=True)
@@ -353,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
                     selected.landmarks,
                     sensitivity=args.sensitivity,
                     hand_type=config.hand_type,
+                    ease=args.ease,
                 )
                 pose = smoother.update(raw_pose)
                 now = time.monotonic()
@@ -368,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                             if args.verbose and pose != last_pose:
                                 print(f"sent pose #{send_count}: {pose}", flush=True)
                             last_pose = list(pose)
+                            last_sent_pose[0] = list(pose)
                         except Exception as exc:
                             print(f"WARNING: move_pose failed: {exc}", flush=True)
                 if not args.no_preview:
@@ -402,9 +431,20 @@ def main(argv: list[str] | None = None) -> int:
         cap.release()
         if not args.no_preview:
             cv2.destroyAllWindows()
-        if controller is not None and args.sync_hand:
+        if controller is not None:
+            src = last_sent_pose[0]
             try:
-                controller.move_pose(teleop_open_pose)
+                if src is None:
+                    controller.move_pose(teleop_open_pose)
+                else:
+                    _startup("Returning hand to open pose ...")
+                    move_pose_smoothed(
+                        controller,
+                        teleop_open_pose,
+                        src=src,
+                        steps=20,
+                        hz=40.0,
+                    )
             except Exception as exc:
                 print(f"WARNING: final move_pose failed: {exc}", flush=True)
 

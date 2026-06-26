@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from l10_hand_control.l10_pose import L10_JOINTS, OPEN_PALM_POSE, build_pose
+from l10_hand_control.l10_pose import L10_JOINTS, OPEN_PALM_POSE, build_pose, smoothstep
 
 # MediaPipe hand landmark indices.
 WRIST = 0
@@ -30,6 +30,15 @@ THUMB_SWING_FORWARD = 55
 THUMB_SWING_PINCH = 35
 THUMB_ROTATION_FORWARD = 82
 THUMB_ROTATION_PINCH = 105
+
+# Thumb-index opposition angle (rad) at open vs pinch poses, used to gate the
+# pinch blend for thumb_swing / thumb_rotation. opposition is large when the
+# thumb is splayed out, small when the thumb touches the index (pinch).
+# NOTE: _thumb_opposition_angle measures the wrist->thumb_mcp vs wrist->index_mcp
+# spread, which is a small angle (~0.34 rad open) because the MCP joints sit close
+# together on the palm. These bounds are tuned to that metric, not fingertip span.
+THUMB_OPPOSITION_OPEN = 0.34
+THUMB_OPPOSITION_PINCH = 0.10
 
 _THUMB_ROOT_INDEX = L10_JOINTS.index("thumb_root")
 _THUMB_SWING_INDEX = L10_JOINTS.index("thumb_swing")
@@ -228,7 +237,13 @@ def _finger_curl(
     return max(core_curl, view_curl * 0.35)
 
 
-def _curl_to_joint(curl: float, sensitivity: float = 1.0) -> int:
+def _curl_to_joint(curl: float, sensitivity: float = 1.0, ease: bool = True) -> int:
+    # Static finger curl map stays linear in the deadband-normalized curl so
+    # partial grips keep their resolution. The "soft" feel comes from the
+    # per-joint velocity/acceleration limits in PoseSmoother (time-domain),
+    # not from reshaping this input/output curve. `ease` is accepted for
+    # API symmetry with the thumb path but does not reshape finger roots.
+    del ease
     if curl <= FINGER_CURL_DEADBAND:
         return 255
     normalized = _clamp((curl - FINGER_CURL_DEADBAND) / (1.0 - FINGER_CURL_DEADBAND), 0.0, 1.0)
@@ -237,11 +252,6 @@ def _curl_to_joint(curl: float, sensitivity: float = 1.0) -> int:
     if value >= 245:
         return 255
     return value
-
-
-def _apply_sensitivity(value: int, open_value: int, sensitivity: float) -> int:
-    delta = open_value - value
-    return int(round(_clamp(open_value - delta * sensitivity, 0.0, 255.0)))
 
 
 def _spread_angle(wrist: Landmark, mcp_a: Landmark, mcp_b: Landmark) -> float:
@@ -255,8 +265,18 @@ def _spread_angle(wrist: Landmark, mcp_a: Landmark, mcp_b: Landmark) -> float:
     return math.acos(cos_angle)
 
 
-def _spread_to_swing(spread_rad: float, closed_rad: float = 0.15, open_rad: float = 0.55) -> int:
+def _spread_to_swing(
+    spread_rad: float,
+    closed_rad: float = 0.15,
+    open_rad: float = 0.55,
+    sensitivity: float = 1.0,
+) -> int:
     t = _clamp((spread_rad - closed_rad) / (open_rad - closed_rad), 0.0, 1.0)
+    # Amplify deviation from the neutral (mid) spread, not deviation from 255.
+    # sensitivity>1 makes the swing travel further from the mid point on both sides.
+    if sensitivity != 1.0:
+        mid = 0.5
+        t = _clamp(mid + (t - mid) * sensitivity, 0.0, 1.0)
     return int(round(_lerp(120.0, 255.0, t)))
 
 
@@ -322,29 +342,49 @@ def _thumb_forward_sweep_amount(landmarks: Landmarks) -> float:
     return _clamp(max(spread_sweep, opposition_sweep * 0.85) * 1.1, 0.0, 1.0)
 
 
-def _thumb_root_value(landmarks: Landmarks, sensitivity: float) -> int:
+def _thumb_root_value(landmarks: Landmarks, sensitivity: float, ease: bool = True) -> int:
     curl = _thumb_bend_amount(landmarks)
     # Amplify small bends so thumb_root moves before a full fist.
     scaled = _clamp((curl ** 0.65) * sensitivity * 2.2, 0.0, 1.0)
+    if ease:
+        # Ease the thumb flex so it starts gently (thumb opposes before it
+        # folds), then accelerates -- matches the human thumb's opposition-then-
+        # flexion sequence without fully suppressing an independent thumb bend.
+        scaled = smoothstep(scaled)
     return int(round(_lerp(255.0, 0.0, scaled)))
+
+
+def _thumb_pinch_amount(landmarks: Landmarks) -> float:
+    """1 when the thumb is pinched against the index, 0 at the open pose.
+
+    opposition angle is large (splayed) when open, small when pinching, so the
+    pinch amount grows as opposition shrinks from THUMB_OPPOSITION_OPEN toward
+    THUMB_OPPOSITION_PINCH.
+    """
+    opposition = _thumb_opposition_angle(landmarks)
+    return _clamp(
+        (THUMB_OPPOSITION_OPEN - opposition)
+        / (THUMB_OPPOSITION_OPEN - THUMB_OPPOSITION_PINCH),
+        0.0,
+        1.0,
+    )
 
 
 def _thumb_swing_value(landmarks: Landmarks, hand_type: str = "left") -> int:
     """thumb_swing=255 is the calibrated open pose; forward thumb sweep lowers it."""
     del hand_type  # reserved for left/right asymmetry
     forward_sweep = _thumb_forward_sweep_amount(landmarks)
-    opposition = _thumb_opposition_angle(landmarks)
+    pinch = _thumb_pinch_amount(landmarks)
 
     swing = int(round(_lerp(float(THUMB_TELEOP_REST["thumb_swing"]), float(THUMB_SWING_FORWARD), forward_sweep)))
-    if opposition > 1.0:
-        t = _clamp((opposition - 1.0) / 0.50, 0.0, 1.0)
-        swing = int(round(_lerp(float(swing), float(THUMB_SWING_PINCH), t)))
+    if pinch > 0.0:
+        swing = int(round(_lerp(float(swing), float(THUMB_SWING_PINCH), pinch)))
     return swing
 
 
 def _thumb_rotation_value(landmarks: Landmarks) -> int:
     forward_sweep = _thumb_forward_sweep_amount(landmarks)
-    opposition = _thumb_opposition_angle(landmarks)
+    pinch = _thumb_pinch_amount(landmarks)
 
     rotation = int(
         round(
@@ -355,9 +395,8 @@ def _thumb_rotation_value(landmarks: Landmarks) -> int:
             )
         )
     )
-    if opposition > 1.0:
-        t = _clamp((opposition - 1.0) / 0.50, 0.0, 1.0)
-        rotation = int(round(_lerp(float(rotation), float(THUMB_ROTATION_PINCH), t)))
+    if pinch > 0.0:
+        rotation = int(round(_lerp(float(rotation), float(THUMB_ROTATION_PINCH), pinch)))
     return rotation
 
 
@@ -365,6 +404,7 @@ def landmarks_to_pose(
     landmarks: Landmarks,
     sensitivity: float = 1.2,
     hand_type: str = "left",
+    ease: bool = True,
 ) -> list[int]:
     """Convert 21 hand landmarks to a 10-value L10 pose."""
     if len(landmarks) != 21:
@@ -372,7 +412,7 @@ def landmarks_to_pose(
     if sensitivity <= 0:
         raise ValueError("sensitivity must be > 0")
 
-    thumb_root = _thumb_root_value(landmarks, sensitivity)
+    thumb_root = _thumb_root_value(landmarks, sensitivity, ease=ease)
     thumb_swing = _thumb_swing_value(landmarks, hand_type=hand_type)
     thumb_rotation = _thumb_rotation_value(landmarks)
     palm_facing = _palm_facing_camera_amount(landmarks)
@@ -387,6 +427,7 @@ def landmarks_to_pose(
                 palm_facing=palm_facing,
             ),
             sensitivity,
+            ease=ease,
         )
 
     overrides = {
@@ -396,26 +437,17 @@ def landmarks_to_pose(
         "middle_root": finger_root(MIDDLE_MCP, MIDDLE_PIP, MIDDLE_DIP, MIDDLE_TIP),
         "ring_root": finger_root(RING_MCP, RING_PIP, RING_DIP, RING_TIP),
         "pinky_root": finger_root(PINKY_MCP, PINKY_PIP, PINKY_DIP, PINKY_TIP),
-        "index_swing": _apply_sensitivity(
-            _spread_to_swing(
-                _spread_angle(landmarks[WRIST], landmarks[INDEX_MCP], landmarks[MIDDLE_MCP])
-            ),
-            255,
-            sensitivity,
+        "index_swing": _spread_to_swing(
+            _spread_angle(landmarks[WRIST], landmarks[INDEX_MCP], landmarks[MIDDLE_MCP]),
+            sensitivity=sensitivity,
         ),
-        "ring_swing": _apply_sensitivity(
-            _spread_to_swing(
-                _spread_angle(landmarks[WRIST], landmarks[MIDDLE_MCP], landmarks[RING_MCP])
-            ),
-            255,
-            sensitivity,
+        "ring_swing": _spread_to_swing(
+            _spread_angle(landmarks[WRIST], landmarks[MIDDLE_MCP], landmarks[RING_MCP]),
+            sensitivity=sensitivity,
         ),
-        "pinky_swing": _apply_sensitivity(
-            _spread_to_swing(
-                _spread_angle(landmarks[WRIST], landmarks[RING_MCP], landmarks[PINKY_MCP])
-            ),
-            255,
-            sensitivity,
+        "pinky_swing": _spread_to_swing(
+            _spread_angle(landmarks[WRIST], landmarks[RING_MCP], landmarks[PINKY_MCP]),
+            sensitivity=sensitivity,
         ),
         "thumb_rotation": thumb_rotation,
     }
@@ -437,12 +469,23 @@ class PoseSmoother:
         alpha: float = 0.35,
         thumb_alpha: float | None = None,
         finger_alpha: float | None = None,
+        max_joint_delta: float = 0.0,
+        close_ratio: float = 1.0,
     ):
         if alpha <= 0.0 or alpha > 1.0:
             raise ValueError("alpha must be in (0, 1]")
+        if max_joint_delta < 0.0:
+            raise ValueError("max_joint_delta must be >= 0")
+        if not 0.0 < close_ratio <= 1.0:
+            raise ValueError("close_ratio must be in (0, 1]")
         self.alpha = alpha
         self.thumb_alpha = alpha if thumb_alpha is None else min(1.0, thumb_alpha)
         self.finger_alpha = alpha if finger_alpha is None else min(1.0, finger_alpha)
+        # Per-frame per-joint velocity cap (in joint-value units). 0 = disabled.
+        # The closing direction (value decreasing) is scaled by close_ratio so a
+        # grip closes slower than it opens, matching human hand pacing.
+        self.max_joint_delta = max_joint_delta
+        self.close_ratio = close_ratio
         self._state: list[int] | None = None
 
     def reset(self) -> None:
@@ -454,6 +497,19 @@ class PoseSmoother:
         if abs(current - previous) < self._FINGER_MICRO_DEADBAND:
             return previous
         return current
+
+    def _limit_delta(self, previous: int, blended: int) -> int:
+        if self.max_joint_delta <= 0.0:
+            return blended
+        delta = blended - previous
+        # Closing = value decreasing (L10: smaller = more curled/closed).
+        if delta < 0:
+            limit = self.max_joint_delta * self.close_ratio
+        else:
+            limit = self.max_joint_delta
+        if abs(delta) > limit:
+            delta = int(round(math.copysign(limit, delta)))
+        return int(_clamp(previous + delta, 0.0, 255.0))
 
     def update(self, pose: list[int]) -> list[int]:
         if len(pose) != len(L10_JOINTS):
@@ -472,7 +528,9 @@ class PoseSmoother:
             else:
                 joint_alpha = self.alpha
             keep = 1.0 - joint_alpha
-            blended.append(int(round(joint_alpha * current + keep * previous)))
+            value = int(round(joint_alpha * current + keep * previous))
+            value = self._limit_delta(previous, value)
+            blended.append(value)
         self._state = blended
         return list(self._state)
 

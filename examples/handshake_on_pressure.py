@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from l10_hand_control.config import HandConfig
-from l10_hand_control.l10_pose import build_pose
+from l10_hand_control.l10_pose import build_pose, move_pose_smoothed
 from l10_hand_control.sdk_backend import SdkController
 
 
@@ -122,7 +122,8 @@ def main() -> None:
     hand = controller.hand
 
     controller.set_speed([80] * 10)
-    controller.move_pose(OPEN_POSE)
+    current_pose = list(OPEN_POSE)
+    current_pose = move_pose_smoothed(controller, OPEN_POSE, src=current_pose, steps=10, hz=50.0)
 
     print("Waiting for selected pressure input. Press Ctrl+C to stop.")
     print(f"CAN={CAN_CHANNEL}, threshold={THRESHOLD}, source={TRIGGER_SOURCE}")
@@ -144,16 +145,22 @@ def main() -> None:
             if should_close_hand(pressure):
                 print("Pressure detected. Closing hand.")
                 controller.set_speed([100] * 10)
-                controller.move_pose(HANDSHAKE_POSE)
+                current_pose = move_pose_smoothed(
+                    controller, HANDSHAKE_POSE, src=current_pose, steps=18, hz=60.0
+                )
                 time.sleep(GRIP_SECONDS)
-                controller.move_pose(OPEN_POSE)
+                controller.set_speed([80] * 10)
+                current_pose = move_pose_smoothed(
+                    controller, OPEN_POSE, src=current_pose, steps=18, hz=60.0
+                )
                 time.sleep(COOLDOWN_SECONDS)
             else:
                 time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         print()
         print("Stopped. Opening hand.")
-        controller.move_pose(OPEN_POSE)
+        controller.set_speed([80] * 10)
+        move_pose_smoothed(controller, OPEN_POSE, src=current_pose, steps=18, hz=60.0)
 
 
 if __name__ == "__main__":

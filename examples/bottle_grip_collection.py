@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from l10_hand_control.config import HandConfig
-from l10_hand_control.l10_pose import L10_JOINTS, build_pose
+from l10_hand_control.l10_pose import L10_JOINTS, build_pose, move_pose_smoothed
 from l10_hand_control.sdk_backend import SdkController
 
 
@@ -466,6 +466,7 @@ def main() -> None:
     )
 
     open_palm = build_pose({})
+    current_pose = list(open_palm)
     print(f"Results will be saved to: {RESULTS_PATH}")
     print("Put the bottle in the test position. Press Ctrl+C or type q to stop.")
 
@@ -479,11 +480,15 @@ def main() -> None:
             input("Press Enter to open the hand and start this trial...")
 
             hand.set_speed([DEFAULT_SPEED] * 10)
-            hand.move_pose(open_palm)
+            current_pose = move_pose_smoothed(
+                hand, open_palm, src=current_pose, steps=14, hz=60.0
+            )
             time.sleep(OPEN_SECONDS)
 
             hand.set_speed([trial["speed"]] * 10)
-            hand.move_pose(pose)
+            current_pose = move_pose_smoothed(
+                hand, pose, src=current_pose, steps=20, hz=60.0
+            )
             time.sleep(trial["hold_seconds"])
 
             success = ask_success()
@@ -491,7 +496,9 @@ def main() -> None:
             print(f"Saved trial {trial_number} with success={success}.")
 
             hand.set_speed([DEFAULT_SPEED] * 10)
-            hand.move_pose(open_palm)
+            current_pose = move_pose_smoothed(
+                hand, open_palm, src=current_pose, steps=14, hz=60.0
+            )
             time.sleep(REST_SECONDS)
     except KeyboardInterrupt:
         print()
